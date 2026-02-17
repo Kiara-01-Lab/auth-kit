@@ -1,0 +1,81 @@
+{
+  "name": "authkit",
+  "version": "0.1.0",
+  "description": "Lightweight SDK for adding authentication, users, roles, and API keys to any Node.js app",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "demo.js",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "demo": "node demo.js",
+    "server": "node server.js",
+    "test": "jest --coverage",
+    "test:watch": "jest --watch",
+    "test:ci": "jest --ci --coverage --maxWorkers=2",
+    "prepublishOnly": "npm run test"
+  },
+  "keywords": [
+    "authentication",
+    "auth",
+    "users",
+    "roles",
+    "rbac",
+    "api-keys",
+    "tokens",
+    "jwt",
+    "session",
+    "permissions",
+    "sdk",
+    "middleware",
+    "express",
+    "sqlite",
+    "password"
+  ],
+  "author": "Kiara Lab",
+  "license": "MIT",
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "dependencies": {
+    "cors": "^2.8.6",
+    "express": "^5.2.1",
+    "nanoid": "^5.1.6",
+    "sql.js": "^1.13.0",
+    "uuid": "^13.0.0"
+  },
+  "devDependencies": {
+    "@babel/preset-env": "^7.28.6",
+    "babel-jest": "^29.7.0",
+    "jest": "^29.7.0"
+  },
+  "jest": {
+    "testEnvironment": "node",
+    "coverageDirectory": "coverage",
+    "collectCoverageFrom": [
+      "index.js",
+      "!node_modules/**",
+      "!coverage/**",
+      "!demo.js"
+    ],
+    "testMatch": [
+      "**/tests/**/*.test.js"
+    ],
+    "transformIgnorePatterns": [
+      "node_modules/(?!(nanoid|uuid)/)"
+    ],
+    "coverageThreshold": {
+      "global": {
+        "branches": 50,
+        "functions": 50,
+        "lines": 50,
+        "statements": 50
+      }
+    }
+  }
+}
