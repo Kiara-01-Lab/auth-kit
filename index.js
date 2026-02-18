@@ -66,6 +66,31 @@ function sanitizeUser(user) {
 }
 
 // ============================================================================
+// STORAGE ADAPTER (Abstract Base)
+// ============================================================================
+
+class StorageAdapter {
+  async init() { throw new Error('Not implemented'); }
+  async close() { throw new Error('Not implemented'); }
+  async createUser(data) { throw new Error('Not implemented'); }
+  async getUser(id) { throw new Error('Not implemented'); }
+  async getUserByEmail(email) { throw new Error('Not implemented'); }
+  async listUsers(query) { throw new Error('Not implemented'); }
+  async updateUser(id, updates) { throw new Error('Not implemented'); }
+  async deleteUser(id) { throw new Error('Not implemented'); }
+  async createToken(data) { throw new Error('Not implemented'); }
+  async getToken(tokenHash) { throw new Error('Not implemented'); }
+  async deleteToken(tokenHash) { throw new Error('Not implemented'); }
+  async deleteUserTokens(userId) { throw new Error('Not implemented'); }
+  async updateTokenLastUsed(tokenHash) { throw new Error('Not implemented'); }
+  async createAPIKey(data) { throw new Error('Not implemented'); }
+  async getAPIKey(keyHash) { throw new Error('Not implemented'); }
+  async listAPIKeys(userId) { throw new Error('Not implemented'); }
+  async deleteAPIKey(id) { throw new Error('Not implemented'); }
+  async updateAPIKeyLastUsed(keyHash) { throw new Error('Not implemented'); }
+}
+
+// ============================================================================
 // MEMORY ADAPTER
 // ============================================================================
 
@@ -425,6 +450,229 @@ class SQLiteAdapter {
 }
 
 // ============================================================================
+// POSTGRESQL ADAPTER
+// ============================================================================
+
+class PostgreSQLAdapter extends StorageAdapter {
+  constructor(connectionString) {
+    super();
+    this.connectionString = connectionString;
+    this.pool = null;
+  }
+
+  async init() {
+    const { Pool } = require('pg');
+
+    const needsSSL = this.connectionString.includes('sslmode=require') ||
+                     this.connectionString.includes('.supabase.com') ||
+                     this.connectionString.includes('.amazonaws.com') ||
+                     this.connectionString.includes('.neon.tech') ||
+                     this.connectionString.includes('.railway.app');
+
+    let connString = this.connectionString;
+    if (needsSSL && connString.includes('?')) {
+      const [baseUrl, queryString] = connString.split('?');
+      const params = new URLSearchParams(queryString);
+      params.delete('sslmode');
+      params.delete('supa');
+      const remaining = params.toString();
+      connString = remaining ? `${baseUrl}?${remaining}` : baseUrl;
+    }
+
+    this.pool = new Pool({
+      connectionString: connString,
+      ssl: needsSSL ? { rejectUnauthorized: false } : false,
+    });
+
+    await this._migrate();
+    return this;
+  }
+
+  async _migrate() {
+    await this.pool.query(`
+      CREATE TABLE IF NOT EXISTS users (
+        id TEXT PRIMARY KEY,
+        email TEXT UNIQUE NOT NULL,
+        username TEXT,
+        password_hash TEXT NOT NULL,
+        roles JSONB NOT NULL DEFAULT '[]',
+        metadata JSONB NOT NULL DEFAULT '{}',
+        is_active BOOLEAN NOT NULL DEFAULT TRUE,
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL,
+        last_login_at TIMESTAMPTZ
+      );
+
+      CREATE TABLE IF NOT EXISTS tokens (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        token_hash TEXT UNIQUE NOT NULL,
+        token_type TEXT NOT NULL DEFAULT 'session',
+        expires_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL,
+        last_used_at TIMESTAMPTZ
+      );
+
+      CREATE TABLE IF NOT EXISTS api_keys (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        key_hash TEXT UNIQUE NOT NULL,
+        name TEXT,
+        expires_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL,
+        last_used_at TIMESTAMPTZ
+      );
+    `);
+
+    await this.pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_users_email ON users(LOWER(email));
+      CREATE INDEX IF NOT EXISTS idx_tokens_user ON tokens(user_id);
+      CREATE INDEX IF NOT EXISTS idx_tokens_hash ON tokens(token_hash);
+      CREATE INDEX IF NOT EXISTS idx_apikeys_user ON api_keys(user_id);
+      CREATE INDEX IF NOT EXISTS idx_apikeys_hash ON api_keys(key_hash);
+    `);
+  }
+
+  async close() {
+    if (this.pool) await this.pool.end();
+  }
+
+  // --- Users ---
+  async createUser(data) {
+    const res = await this.pool.query(
+      `INSERT INTO users (id, email, username, password_hash, roles, metadata, is_active, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       RETURNING *`,
+      [data.id, data.email, data.username || null, data.password_hash,
+       JSON.stringify(data.roles || []), JSON.stringify(data.metadata || {}),
+       true, data.created_at, data.updated_at]
+    );
+    return res.rows[0];
+  }
+
+  async getUser(id) {
+    const res = await this.pool.query('SELECT * FROM users WHERE id = $1', [id]);
+    return res.rows[0] || null;
+  }
+
+  async getUserByEmail(email) {
+    const res = await this.pool.query(
+      'SELECT * FROM users WHERE LOWER(email) = LOWER($1)', [email]);
+    return res.rows[0] || null;
+  }
+
+  async listUsers(query = {}) {
+    let sql = 'SELECT * FROM users WHERE 1=1';
+    const params = [];
+    let i = 1;
+
+    if (query.keyword) {
+      sql += ` AND (LOWER(email) LIKE $${i} OR LOWER(username) LIKE $${i})`;
+      params.push(`%${query.keyword.toLowerCase()}%`);
+      i++;
+    }
+    if (query.role) {
+      sql += ` AND roles @> $${i}::jsonb`;
+      params.push(JSON.stringify([query.role]));
+      i++;
+    }
+
+    sql += ' ORDER BY created_at DESC';
+    const res = await this.pool.query(sql, params);
+    return res.rows;
+  }
+
+  async updateUser(id, updates) {
+    const user = await this.getUser(id);
+    if (!user) return null;
+
+    const merged = { ...user, ...updates, updated_at: new Date().toISOString() };
+    const res = await this.pool.query(
+      `UPDATE users
+       SET email=$1, username=$2, password_hash=$3, roles=$4, metadata=$5,
+           is_active=$6, updated_at=$7, last_login_at=$8
+       WHERE id=$9
+       RETURNING *`,
+      [merged.email, merged.username || null, merged.password_hash,
+       JSON.stringify(merged.roles || []), JSON.stringify(merged.metadata || {}),
+       merged.is_active, merged.updated_at, merged.last_login_at || null, id]
+    );
+    return res.rows[0] || null;
+  }
+
+  async deleteUser(id) {
+    await this.pool.query('DELETE FROM users WHERE id = $1', [id]);
+    // CASCADE handles tokens and api_keys deletion
+  }
+
+  // --- Tokens ---
+  async createToken(data) {
+    await this.pool.query(
+      `INSERT INTO tokens (id, user_id, token_hash, token_type, expires_at, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [data.id, data.user_id, data.token_hash, data.token_type || 'session',
+       data.expires_at || null, data.created_at]
+    );
+    return data;
+  }
+
+  async getToken(tokenHash) {
+    const res = await this.pool.query(
+      'SELECT * FROM tokens WHERE token_hash = $1', [tokenHash]);
+    return res.rows[0] || null;
+  }
+
+  async deleteToken(tokenHash) {
+    await this.pool.query('DELETE FROM tokens WHERE token_hash = $1', [tokenHash]);
+  }
+
+  async deleteUserTokens(userId) {
+    await this.pool.query('DELETE FROM tokens WHERE user_id = $1', [userId]);
+  }
+
+  async updateTokenLastUsed(tokenHash) {
+    await this.pool.query(
+      'UPDATE tokens SET last_used_at = $1 WHERE token_hash = $2',
+      [new Date().toISOString(), tokenHash]
+    );
+  }
+
+  // --- API Keys ---
+  async createAPIKey(data) {
+    await this.pool.query(
+      `INSERT INTO api_keys (id, user_id, key_hash, name, expires_at, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [data.id, data.user_id, data.key_hash, data.name || null,
+       data.expires_at || null, data.created_at]
+    );
+    return data;
+  }
+
+  async getAPIKey(keyHash) {
+    const res = await this.pool.query(
+      'SELECT * FROM api_keys WHERE key_hash = $1', [keyHash]);
+    return res.rows[0] || null;
+  }
+
+  async listAPIKeys(userId) {
+    const res = await this.pool.query(
+      'SELECT * FROM api_keys WHERE user_id = $1 ORDER BY created_at DESC', [userId]);
+    return res.rows;
+  }
+
+  async deleteAPIKey(id) {
+    await this.pool.query('DELETE FROM api_keys WHERE id = $1', [id]);
+  }
+
+  async updateAPIKeyLastUsed(keyHash) {
+    await this.pool.query(
+      'UPDATE api_keys SET last_used_at = $1 WHERE key_hash = $2',
+      [new Date().toISOString(), keyHash]
+    );
+  }
+}
+
+// ============================================================================
 // AUTHKIT
 // ============================================================================
 
@@ -456,6 +704,10 @@ class AuthKit extends EventEmitter {
 
     if (config.adapter) {
       adapter = config.adapter;
+    } else if (config.connectionString || config.storage === 'postgres' || config.storage === 'postgresql') {
+      const connStr = config.connectionString || process.env.DATABASE_URL;
+      if (!connStr) throw new Error('connectionString or DATABASE_URL env var is required for PostgreSQL storage');
+      adapter = new PostgreSQLAdapter(connStr);
     } else if (config.storage === 'file' || config.filename) {
       adapter = new SQLiteAdapter(config.filename || './auth.db');
     } else {
@@ -741,7 +993,8 @@ class AuthKit extends EventEmitter {
     await this.storage.createAPIKey(record);
     this.emit('apikey:created', { user_id: userId, name });
 
-    return { key, record };
+    const { key_hash, ...safeRecord } = record;
+    return { key, record: safeRecord };
   }
 
   /**
@@ -926,4 +1179,4 @@ class AuthKit extends EventEmitter {
 // EXPORTS
 // ============================================================================
 
-module.exports = { AuthKit, MemoryAdapter, SQLiteAdapter };
+module.exports = { AuthKit, MemoryAdapter, SQLiteAdapter, PostgreSQLAdapter, StorageAdapter };
