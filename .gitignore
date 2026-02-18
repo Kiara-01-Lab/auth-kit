@@ -6,3 +6,4 @@ coverage/
 .DS_Store
 client/dist/
 client/node_modules/
+HANDOFF.md
