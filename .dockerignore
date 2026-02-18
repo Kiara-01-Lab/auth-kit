@@ -1,0 +1,6 @@
+node_modules
+coverage
+.git
+client/node_modules
+client/dist
+*.db
