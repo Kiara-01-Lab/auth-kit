@@ -66,8 +66,6 @@ async function init() {
 // ============================================================================
 
 app.use('/admin', express.static(path.join(__dirname, 'client/dist')));
-app.get('/admin', (req, res) => res.sendFile(path.join(__dirname, 'client/dist/index.html')));
-app.get('/admin/*', (req, res) => res.sendFile(path.join(__dirname, 'client/dist/index.html')));
 
 // ============================================================================
 // HEALTH / INFO
