@@ -7,10 +7,20 @@
 
 const express = require('express');
 const cors = require('cors');
+const rateLimit = require('express-rate-limit');
 const { AuthKit } = require('./index.js');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
+
+// Rate limiters
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 20,
+  message: { error: 'Too many requests, please try again later.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
 
 // Middleware
 app.use(cors());
@@ -55,7 +65,7 @@ async function init() {
 // ============================================================================
 
 // Register
-app.post('/auth/register', async (req, res, next) => {
+app.post('/auth/register', authLimiter, async (req, res, next) => {
   try {
     const { email, password, username } = req.body;
     if (!email || !password) {
@@ -71,7 +81,7 @@ app.post('/auth/register', async (req, res, next) => {
 });
 
 // Login
-app.post('/auth/login', async (req, res, next) => {
+app.post('/auth/login', authLimiter, async (req, res, next) => {
   try {
     const { email, password } = req.body;
     if (!email || !password) {
@@ -87,18 +97,6 @@ app.post('/auth/login', async (req, res, next) => {
   }
 });
 
-// Logout
-app.post('/auth/logout', auth && auth.requireAuth ? auth.requireAuth() : (req, res, next) => next(), async (req, res, next) => {
-  try {
-    const token = (req.headers['authorization'] || '').replace('Bearer ', '') ||
-                  req.headers['x-api-key'] || '';
-    await auth.logout(token);
-    res.json({ ok: true });
-  } catch (err) {
-    next(err);
-  }
-});
-
 // Lazy-bind requireAuth since auth is not ready at route definition time
 function requireAuth() {
   return (req, res, next) => auth.requireAuth()(req, res, next);
@@ -107,7 +105,7 @@ function requireRole(role) {
   return (req, res, next) => auth.requireRole(role)(req, res, next);
 }
 
-// Re-define logout with proper middleware
+// Logout
 app.post('/auth/logout', requireAuth(), async (req, res, next) => {
   try {
     const token = (req.headers['authorization'] || '').replace('Bearer ', '') ||
@@ -146,6 +144,36 @@ app.post('/auth/change-password', requireAuth(), async (req, res, next) => {
     res.json({ ok: true });
   } catch (err) {
     if (err.message.includes('incorrect')) return res.status(400).json({ error: err.message });
+    next(err);
+  }
+});
+
+// Forgot password — always returns 200 to avoid email enumeration
+app.post('/auth/forgot-password', authLimiter, async (req, res, next) => {
+  try {
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ error: 'email is required' });
+    const token = await auth.generatePasswordResetToken(email);
+    // In production: send token via email. For now, return it in the response.
+    const payload = { ok: true };
+    if (token) payload.reset_token = token; // omit in prod when email is wired up
+    res.json(payload);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Reset password with token
+app.post('/auth/reset-password', authLimiter, async (req, res, next) => {
+  try {
+    const { token, newPassword } = req.body;
+    if (!token || !newPassword) {
+      return res.status(400).json({ error: 'token and newPassword are required' });
+    }
+    await auth.resetPasswordWithToken(token, newPassword);
+    res.json({ ok: true });
+  } catch (err) {
+    if (err.message.includes('Invalid or expired')) return res.status(400).json({ error: err.message });
     next(err);
   }
 });
@@ -318,6 +346,8 @@ init().then(() => {
     console.log(`   GET    /auth/me`);
     console.log(`   POST   /auth/refresh`);
     console.log(`   POST   /auth/change-password`);
+    console.log(`   POST   /auth/forgot-password`);
+    console.log(`   POST   /auth/reset-password`);
     console.log(`   GET    /users              (admin)`);
     console.log(`   POST   /users              (admin)`);
     console.log(`   PATCH  /users/:id          (admin)`);

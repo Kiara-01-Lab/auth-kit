@@ -45,6 +45,7 @@
   "dependencies": {
     "cors": "^2.8.6",
     "express": "^5.2.1",
+    "express-rate-limit": "^8.2.1",
     "nanoid": "^5.1.6",
     "pg": "^8.13.3",
     "sql.js": "^1.13.0",

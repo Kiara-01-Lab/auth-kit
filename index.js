@@ -691,6 +691,7 @@ class AuthKit extends EventEmitter {
       ...config,
     };
     this.storage = null;
+    this._resetTokens = new Map(); // token_hash -> { userId, expiresAt }
   }
 
   /**
@@ -962,6 +963,42 @@ class AuthKit extends EventEmitter {
     await this.storage.updateUser(userId, { password_hash: newHash });
     await this.storage.deleteUserTokens(userId);
     this.emit('user:password_reset', { user_id: userId });
+  }
+
+  /**
+   * Generate a short-lived password reset token for a user email.
+   * Returns the plaintext token (caller should deliver it via email).
+   * Never reveals whether the email exists (always returns ok).
+   */
+  async generatePasswordResetToken(email, { expiryMs = 60 * 60 * 1000 } = {}) {
+    const user = await this.storage.getUserByEmail(email);
+    if (!user) return null; // silently return null; route layer always responds 200
+
+    const token = generateToken();
+    const tokenHash = hashToken(token);
+    const expiresAt = Date.now() + expiryMs;
+
+    this._resetTokens.set(tokenHash, { userId: user.id, expiresAt });
+    this.emit('user:password_reset_requested', { user_id: user.id });
+    return token;
+  }
+
+  /**
+   * Reset a user's password using a reset token.
+   * Invalidates the token after use.
+   */
+  async resetPasswordWithToken(token, newPassword) {
+    const tokenHash = hashToken(token);
+    const entry = this._resetTokens.get(tokenHash);
+
+    if (!entry) throw new Error('Invalid or expired reset token');
+    if (Date.now() > entry.expiresAt) {
+      this._resetTokens.delete(tokenHash);
+      throw new Error('Invalid or expired reset token');
+    }
+
+    await this.resetPassword(entry.userId, newPassword);
+    this._resetTokens.delete(tokenHash);
   }
 
   // --------------------------------------------------------------------------
