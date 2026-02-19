@@ -1,5 +1,5 @@
 {
-  "name": "authkit",
+  "name": "@getkiara/auth-kit",
   "version": "0.1.0",
   "description": "Lightweight SDK for adding authentication, users, roles, and API keys to any Node.js app",
   "main": "index.js",
@@ -9,8 +9,7 @@
     "index.d.ts",
     "demo.js",
     "README.md",
-    "LICENSE",
-    "CHANGELOG.md"
+    "LICENSE"
   ],
   "scripts": {
     "demo": "node demo.js",
