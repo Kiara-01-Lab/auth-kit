@@ -61,6 +61,38 @@ async function init() {
 }
 
 // ============================================================================
+// HEALTH / INFO
+// ============================================================================
+
+app.get('/', (req, res) => {
+  res.json({
+    name: 'AuthKit',
+    version: require('./package.json').version,
+    status: 'ok',
+    endpoints: [
+      'POST /auth/register',
+      'POST /auth/login',
+      'POST /auth/logout',
+      'GET  /auth/me',
+      'POST /auth/refresh',
+      'POST /auth/change-password',
+      'POST /auth/forgot-password',
+      'POST /auth/reset-password',
+      'GET  /users              (admin)',
+      'POST /users              (admin)',
+      'GET  /users/:id          (admin)',
+      'PATCH /users/:id         (admin)',
+      'DELETE /users/:id        (admin)',
+      'POST /users/:id/roles    (admin)',
+      'DELETE /users/:id/roles/:role (admin)',
+      'GET  /users/:id/api-keys',
+      'POST /users/:id/api-keys',
+      'DELETE /api-keys/:id',
+    ],
+  });
+});
+
+// ============================================================================
 // AUTH ROUTES
 // ============================================================================
 
