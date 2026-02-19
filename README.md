@@ -2,7 +2,8 @@
 
 A lightweight, embeddable authentication SDK for Node.js. Add users, sessions, API keys, and role-based access control (RBAC) to any app — no vendor lock-in, no cloud dependency.
 
-**Live demo:** https://auth-kit-production.up.railway.app
+**Live API:** https://auth-kit-production.up.railway.app
+**Admin UI:** https://auth-kit-production.up.railway.app/admin
 
 - **Storage options:** In-memory, SQLite (file), PostgreSQL
 - **Runs anywhere:** localhost, Docker, Railway, Render, Fly.io, any VPS

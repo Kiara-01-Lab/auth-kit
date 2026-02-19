@@ -5,6 +5,7 @@
  * Mount behind your app or run as a sidecar.
  */
 
+const path = require('path');
 const express = require('express');
 const cors = require('cors');
 const rateLimit = require('express-rate-limit');
@@ -61,6 +62,14 @@ async function init() {
 }
 
 // ============================================================================
+// ADMIN UI (served at /admin)
+// ============================================================================
+
+app.use('/admin', express.static(path.join(__dirname, 'client/dist')));
+app.get('/admin', (req, res) => res.sendFile(path.join(__dirname, 'client/dist/index.html')));
+app.get('/admin/*', (req, res) => res.sendFile(path.join(__dirname, 'client/dist/index.html')));
+
+// ============================================================================
 // HEALTH / INFO
 // ============================================================================
 
@@ -69,6 +78,7 @@ app.get('/', (req, res) => {
     name: 'AuthKit',
     version: require('./package.json').version,
     status: 'ok',
+    admin_ui: '/admin',
     endpoints: [
       'POST /auth/register',
       'POST /auth/login',
