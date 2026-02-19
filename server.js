@@ -30,7 +30,7 @@ let auth;
 
 async function init() {
   auth = await AuthKit.create({
-    storage: process.env.AUTH_DB ? 'file' : 'memory',
+    storage: process.env.DATABASE_URL ? 'postgres' : process.env.AUTH_DB ? 'file' : 'memory',
     filename: process.env.AUTH_DB || undefined,
     tokenExpiry: process.env.TOKEN_EXPIRY || '7d',
     roles: {
