@@ -64,10 +64,35 @@ export interface APIKeyRecord {
   last_used_at?: string | null;
 }
 
+export interface Organization {
+  id: string;
+  name: string;
+  owner_user_id: string;
+  created_at: string;
+}
+
+export interface OrgMembership {
+  user_id: string;
+  org_id: string;
+  role: 'owner' | 'admin' | 'member';
+  joined_at: string;
+}
+
+export interface OrgMember extends User {
+  role: string;
+  joined_at: string;
+}
+
 export interface LoginResult {
   user: User;
   token: string;
   expiresAt: string;
+}
+
+export interface LoginWithOrgResult extends LoginResult {
+  org: Organization;
+  role: string;
+  entitlements: string[];
 }
 
 export interface RefreshResult {
@@ -115,6 +140,25 @@ export interface StorageAdapter {
   listAPIKeys(userId: string): Promise<any[]>;
   deleteAPIKey(id: string): Promise<void>;
   updateAPIKeyLastUsed(keyHash: string): Promise<void>;
+
+  // Organizations
+  createOrganization(data: any): Promise<any>;
+  getOrganization(id: string): Promise<any>;
+  listUserOrganizations(userId: string): Promise<any[]>;
+  deleteOrganization(id: string): Promise<void>;
+
+  // Org Memberships
+  addOrgMember(data: any): Promise<void>;
+  removeOrgMember(userId: string, orgId: string): Promise<void>;
+  updateOrgMemberRole(userId: string, orgId: string, role: string): Promise<void>;
+  getOrgMembers(orgId: string): Promise<any[]>;
+  getOrgMembership(userId: string, orgId: string): Promise<any>;
+
+  // Org Entitlements
+  grantAppAccess(orgId: string, appName: string): Promise<void>;
+  revokeAppAccess(orgId: string, appName: string): Promise<void>;
+  getOrgEntitlements(orgId: string): Promise<string[]>;
+  checkAccess(userId: string, orgId: string, appName: string): Promise<boolean>;
 }
 
 // ============================================================================
@@ -140,6 +184,19 @@ export class MemoryAdapter implements StorageAdapter {
   listAPIKeys(userId: string): Promise<any[]>;
   deleteAPIKey(id: string): Promise<void>;
   updateAPIKeyLastUsed(keyHash: string): Promise<void>;
+  createOrganization(data: any): Promise<any>;
+  getOrganization(id: string): Promise<any>;
+  listUserOrganizations(userId: string): Promise<any[]>;
+  deleteOrganization(id: string): Promise<void>;
+  addOrgMember(data: any): Promise<void>;
+  removeOrgMember(userId: string, orgId: string): Promise<void>;
+  updateOrgMemberRole(userId: string, orgId: string, role: string): Promise<void>;
+  getOrgMembers(orgId: string): Promise<any[]>;
+  getOrgMembership(userId: string, orgId: string): Promise<any>;
+  grantAppAccess(orgId: string, appName: string): Promise<void>;
+  revokeAppAccess(orgId: string, appName: string): Promise<void>;
+  getOrgEntitlements(orgId: string): Promise<string[]>;
+  checkAccess(userId: string, orgId: string, appName: string): Promise<boolean>;
 }
 
 export class SQLiteAdapter implements StorageAdapter {
@@ -162,6 +219,19 @@ export class SQLiteAdapter implements StorageAdapter {
   listAPIKeys(userId: string): Promise<any[]>;
   deleteAPIKey(id: string): Promise<void>;
   updateAPIKeyLastUsed(keyHash: string): Promise<void>;
+  createOrganization(data: any): Promise<any>;
+  getOrganization(id: string): Promise<any>;
+  listUserOrganizations(userId: string): Promise<any[]>;
+  deleteOrganization(id: string): Promise<void>;
+  addOrgMember(data: any): Promise<void>;
+  removeOrgMember(userId: string, orgId: string): Promise<void>;
+  updateOrgMemberRole(userId: string, orgId: string, role: string): Promise<void>;
+  getOrgMembers(orgId: string): Promise<any[]>;
+  getOrgMembership(userId: string, orgId: string): Promise<any>;
+  grantAppAccess(orgId: string, appName: string): Promise<void>;
+  revokeAppAccess(orgId: string, appName: string): Promise<void>;
+  getOrgEntitlements(orgId: string): Promise<string[]>;
+  checkAccess(userId: string, orgId: string, appName: string): Promise<boolean>;
 }
 
 // ============================================================================
@@ -201,6 +271,28 @@ export class AuthKit extends EventEmitter {
   hasRole(user: User, role: string): boolean;
   hasPermission(user: User, permission: string): boolean;
 
+  // Organizations
+  createOrganization(params: { name: string; owner_user_id: string; entitlements?: string[] }): Promise<Organization>;
+  getOrganization(id: string): Promise<Organization | null>;
+  listUserOrganizations(userId: string): Promise<Organization[]>;
+  deleteOrganization(id: string): Promise<void>;
+
+  // Org Memberships
+  addOrgMember(params: { org_id: string; user_id: string; role?: 'owner' | 'admin' | 'member' }): Promise<void>;
+  removeOrgMember(params: { org_id: string; user_id: string }): Promise<void>;
+  updateOrgMemberRole(params: { org_id: string; user_id: string; role: 'owner' | 'admin' | 'member' }): Promise<void>;
+  getOrgMembers(org_id: string): Promise<OrgMember[]>;
+  getOrgMembership(user_id: string, org_id: string): Promise<OrgMembership | null>;
+
+  // Org Entitlements
+  grantAppAccess(params: { org_id: string; app_name: string }): Promise<void>;
+  revokeAppAccess(params: { org_id: string; app_name: string }): Promise<void>;
+  getOrgEntitlements(org_id: string): Promise<string[]>;
+  checkAccess(params: { user_id: string; org_id: string; app_name: string }): Promise<boolean>;
+
+  // Login with Org Context
+  loginWithOrg(email: string, password: string, org_id?: string): Promise<LoginWithOrgResult>;
+
   // Express middleware
   expressMiddleware(): RequestHandler;
   requireAuth(): RequestHandler;
@@ -221,5 +313,12 @@ export class AuthKit extends EventEmitter {
   on(event: 'token:expired', listener: (data: { user_id: string }) => void): this;
   on(event: 'apikey:created', listener: (data: { user_id: string; name?: string }) => void): this;
   on(event: 'apikey:revoked', listener: (data: { id: string }) => void): this;
+  on(event: 'org:created', listener: (data: { org: Organization }) => void): this;
+  on(event: 'org:deleted', listener: (data: { org_id: string }) => void): this;
+  on(event: 'org:member_added', listener: (data: { org_id: string; user_id: string; role: string }) => void): this;
+  on(event: 'org:member_removed', listener: (data: { org_id: string; user_id: string }) => void): this;
+  on(event: 'org:member_role_updated', listener: (data: { org_id: string; user_id: string; role: string }) => void): this;
+  on(event: 'org:app_granted', listener: (data: { org_id: string; app_name: string }) => void): this;
+  on(event: 'org:app_revoked', listener: (data: { org_id: string; app_name: string }) => void): this;
   on(event: string, listener: (...args: any[]) => void): this;
 }

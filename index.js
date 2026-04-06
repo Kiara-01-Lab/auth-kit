@@ -6,7 +6,6 @@
  */
 
 const crypto = require('crypto');
-const { v4: uuidv4 } = require('uuid');
 const { nanoid } = require('nanoid');
 const EventEmitter = require('events');
 
@@ -41,7 +40,7 @@ function verifyPassword(password, stored) {
 }
 
 function generateToken() {
-  return uuidv4().replace(/-/g, '') + uuidv4().replace(/-/g, '');
+  return crypto.randomUUID().replace(/-/g, '') + crypto.randomUUID().replace(/-/g, '');
 }
 
 function generateAPIKey() {
@@ -88,6 +87,19 @@ class StorageAdapter {
   async listAPIKeys(userId) { throw new Error('Not implemented'); }
   async deleteAPIKey(id) { throw new Error('Not implemented'); }
   async updateAPIKeyLastUsed(keyHash) { throw new Error('Not implemented'); }
+  async createOrganization(data) { throw new Error('Not implemented'); }
+  async getOrganization(id) { throw new Error('Not implemented'); }
+  async listUserOrganizations(userId) { throw new Error('Not implemented'); }
+  async deleteOrganization(id) { throw new Error('Not implemented'); }
+  async addOrgMember(data) { throw new Error('Not implemented'); }
+  async removeOrgMember(userId, orgId) { throw new Error('Not implemented'); }
+  async updateOrgMemberRole(userId, orgId, role) { throw new Error('Not implemented'); }
+  async getOrgMembers(orgId) { throw new Error('Not implemented'); }
+  async getOrgMembership(userId, orgId) { throw new Error('Not implemented'); }
+  async grantAppAccess(orgId, appName) { throw new Error('Not implemented'); }
+  async revokeAppAccess(orgId, appName) { throw new Error('Not implemented'); }
+  async getOrgEntitlements(orgId) { throw new Error('Not implemented'); }
+  async checkAccess(userId, orgId, appName) { throw new Error('Not implemented'); }
 }
 
 // ============================================================================
@@ -99,6 +111,9 @@ class MemoryAdapter {
     this.users = new Map();
     this.tokens = new Map();    // token_hash -> token record
     this.apiKeys = new Map();   // key_hash -> api key record
+    this.organizations = new Map();
+    this.org_memberships = new Map(); // "userId:orgId" -> membership
+    this.org_entitlements = new Map(); // "orgId:appName" -> grant
   }
 
   async init() { return this; }
@@ -217,6 +232,102 @@ class MemoryAdapter {
       this.apiKeys.set(keyHash, k);
     }
   }
+
+  // --- Organizations (added for multi-tenancy) ---
+  async createOrganization(data) {
+    this.organizations.set(data.id, { ...data });
+    return { ...data };
+  }
+
+  async getOrganization(id) {
+    const o = this.organizations.get(id);
+    return o ? { ...o } : null;
+  }
+
+  async listUserOrganizations(userId) {
+    const orgs = [];
+    for (const [key, m] of this.org_memberships.entries()) {
+      if (m.user_id === userId) {
+        const org = this.organizations.get(m.org_id);
+        if (org) orgs.push({ ...org });
+      }
+    }
+    return orgs;
+  }
+
+  async deleteOrganization(id) {
+    this.organizations.delete(id);
+    // Clean up memberships and entitlements
+    for (const key of this.org_memberships.keys()) {
+      if (key.endsWith(':' + id)) this.org_memberships.delete(key);
+    }
+    for (const key of this.org_entitlements.keys()) {
+      if (key.startsWith(id + ':')) this.org_entitlements.delete(key);
+    }
+  }
+
+  async addOrgMember(data) {
+    const key = `${data.user_id}:${data.org_id}`;
+    this.org_memberships.set(key, { ...data });
+  }
+
+  async removeOrgMember(userId, orgId) {
+    const key = `${userId}:${orgId}`;
+    this.org_memberships.delete(key);
+  }
+
+  async updateOrgMemberRole(userId, orgId, role) {
+    const key = `${userId}:${orgId}`;
+    const m = this.org_memberships.get(key);
+    if (m) {
+      m.role = role;
+      this.org_memberships.set(key, m);
+    }
+  }
+
+  async getOrgMembers(orgId) {
+    const members = [];
+    for (const m of this.org_memberships.values()) {
+      if (m.org_id === orgId) {
+        const user = this.users.get(m.user_id);
+        if (user) {
+          members.push({ ...user, role: m.role, joined_at: m.joined_at });
+        }
+      }
+    }
+    return members;
+  }
+
+  async getOrgMembership(userId, orgId) {
+    const key = `${userId}:${orgId}`;
+    const m = this.org_memberships.get(key);
+    return m ? { ...m } : null;
+  }
+
+  async grantAppAccess(orgId, appName) {
+    const key = `${orgId}:${appName}`;
+    this.org_entitlements.set(key, { org_id: orgId, app_name: appName, granted_at: new Date().toISOString() });
+  }
+
+  async revokeAppAccess(orgId, appName) {
+    const key = `${orgId}:${appName}`;
+    this.org_entitlements.delete(key);
+  }
+
+  async getOrgEntitlements(orgId) {
+    const apps = [];
+    for (const [key, e] of this.org_entitlements.entries()) {
+      if (e.org_id === orgId) apps.push(e.app_name);
+    }
+    return apps;
+  }
+
+  async checkAccess(userId, orgId, appName) {
+    const membership = await this.getOrgMembership(userId, orgId);
+    if (!membership) return false;
+    const key = `${orgId}:${appName}`;
+    return this.org_entitlements.has(key);
+  }
 }
 
 // ============================================================================
@@ -284,6 +395,39 @@ class SQLiteAdapter {
         created_at TEXT NOT NULL,
         last_used_at TEXT,
         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      )
+    `);
+
+    // Multi-tenant tables
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS organizations (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        owner_user_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (owner_user_id) REFERENCES users(id) ON DELETE CASCADE
+      )
+    `);
+
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS org_memberships (
+        user_id TEXT NOT NULL,
+        org_id TEXT NOT NULL,
+        role TEXT NOT NULL DEFAULT 'member',
+        joined_at TEXT NOT NULL,
+        PRIMARY KEY (user_id, org_id),
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+        FOREIGN KEY (org_id) REFERENCES organizations(id) ON DELETE CASCADE
+      )
+    `);
+
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS org_entitlements (
+        org_id TEXT NOT NULL,
+        app_name TEXT NOT NULL,
+        granted_at TEXT NOT NULL,
+        PRIMARY KEY (org_id, app_name),
+        FOREIGN KEY (org_id) REFERENCES organizations(id) ON DELETE CASCADE
       )
     `);
   }
@@ -447,6 +591,116 @@ class SQLiteAdapter {
       [new Date().toISOString(), keyHash]);
     this._persist();
   }
+
+  // --- Organizations ---
+  async createOrganization(data) {
+    this.db.run(
+      `INSERT INTO organizations (id, name, owner_user_id, created_at)
+       VALUES (?, ?, ?, ?)`,
+      [data.id, data.name, data.owner_user_id, data.created_at]
+    );
+    this._persist();
+    return this.getOrganization(data.id);
+  }
+
+  async getOrganization(id) {
+    const res = this.db.exec('SELECT * FROM organizations WHERE id = ?', [id]);
+    return this._rows(res)[0] || null;
+  }
+
+  async listUserOrganizations(userId) {
+    const res = this.db.exec(
+      `SELECT o.* FROM organizations o
+       JOIN org_memberships m ON m.org_id = o.id
+       WHERE m.user_id = ?
+       ORDER BY o.created_at DESC`,
+      [userId]
+    );
+    return this._rows(res);
+  }
+
+  async deleteOrganization(id) {
+    this.db.run('DELETE FROM organizations WHERE id = ?', [id]);
+    this._persist();
+  }
+
+  // --- Org Memberships ---
+  async addOrgMember(data) {
+    this.db.run(
+      `INSERT INTO org_memberships (user_id, org_id, role, joined_at)
+       VALUES (?, ?, ?, ?)`,
+      [data.user_id, data.org_id, data.role || 'member', data.joined_at]
+    );
+    this._persist();
+  }
+
+  async removeOrgMember(userId, orgId) {
+    this.db.run('DELETE FROM org_memberships WHERE user_id = ? AND org_id = ?', [userId, orgId]);
+    this._persist();
+  }
+
+  async updateOrgMemberRole(userId, orgId, role) {
+    this.db.run('UPDATE org_memberships SET role = ? WHERE user_id = ? AND org_id = ?',
+      [role, userId, orgId]);
+    this._persist();
+  }
+
+  async getOrgMembers(orgId) {
+    const res = this.db.exec(
+      `SELECT u.id, u.email, u.username, m.role, m.joined_at
+       FROM users u
+       JOIN org_memberships m ON m.user_id = u.id
+       WHERE m.org_id = ?
+       ORDER BY m.joined_at ASC`,
+      [orgId]
+    );
+    return this._rows(res);
+  }
+
+  async getOrgMembership(userId, orgId) {
+    const res = this.db.exec(
+      'SELECT * FROM org_memberships WHERE user_id = ? AND org_id = ?',
+      [userId, orgId]
+    );
+    return this._rows(res)[0] || null;
+  }
+
+  // --- Org Entitlements ---
+  async grantAppAccess(orgId, appName) {
+    this.db.run(
+      `INSERT INTO org_entitlements (org_id, app_name, granted_at)
+       VALUES (?, ?, ?)`,
+      [orgId, appName, new Date().toISOString()]
+    );
+    this._persist();
+  }
+
+  async revokeAppAccess(orgId, appName) {
+    this.db.run('DELETE FROM org_entitlements WHERE org_id = ? AND app_name = ?',
+      [orgId, appName]);
+    this._persist();
+  }
+
+  async getOrgEntitlements(orgId) {
+    const res = this.db.exec(
+      'SELECT app_name FROM org_entitlements WHERE org_id = ? ORDER BY granted_at ASC',
+      [orgId]
+    );
+    return this._rows(res).map(row => row.app_name);
+  }
+
+  async checkAccess(userId, orgId, appName) {
+    // Check if user is member of org
+    const membership = await this.getOrgMembership(userId, orgId);
+    if (!membership) return false;
+
+    // Check if org has access to app
+    const res = this.db.exec(
+      'SELECT 1 FROM org_entitlements WHERE org_id = ? AND app_name = ?',
+      [orgId, appName]
+    );
+    return this._rows(res).length > 0;
+  }
 }
 
 // ============================================================================
@@ -467,7 +721,8 @@ class PostgreSQLAdapter extends StorageAdapter {
                      this.connectionString.includes('.supabase.com') ||
                      this.connectionString.includes('.amazonaws.com') ||
                      this.connectionString.includes('.neon.tech') ||
-                     this.connectionString.includes('.railway.app');
+                     this.connectionString.includes('.railway.app') ||
+                     this.connectionString.includes('.render.com');
 
     let connString = this.connectionString;
     if (needsSSL && connString.includes('?')) {
@@ -522,6 +777,28 @@ class PostgreSQLAdapter extends StorageAdapter {
         created_at TIMESTAMPTZ NOT NULL,
         last_used_at TIMESTAMPTZ
       );
+
+      CREATE TABLE IF NOT EXISTS organizations (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        created_at TIMESTAMPTZ NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS org_memberships (
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        org_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+        role TEXT NOT NULL DEFAULT 'member',
+        joined_at TIMESTAMPTZ NOT NULL,
+        PRIMARY KEY (user_id, org_id)
+      );
+
+      CREATE TABLE IF NOT EXISTS org_entitlements (
+        org_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+        app_name TEXT NOT NULL,
+        granted_at TIMESTAMPTZ NOT NULL,
+        PRIMARY KEY (org_id, app_name)
+      );
     `);
 
     await this.pool.query(`
@@ -530,6 +807,9 @@ class PostgreSQLAdapter extends StorageAdapter {
       CREATE INDEX IF NOT EXISTS idx_tokens_hash ON tokens(token_hash);
       CREATE INDEX IF NOT EXISTS idx_apikeys_user ON api_keys(user_id);
       CREATE INDEX IF NOT EXISTS idx_apikeys_hash ON api_keys(key_hash);
+      CREATE INDEX IF NOT EXISTS idx_org_memberships_user ON org_memberships(user_id);
+      CREATE INDEX IF NOT EXISTS idx_org_memberships_org ON org_memberships(org_id);
+      CREATE INDEX IF NOT EXISTS idx_org_entitlements_org ON org_entitlements(org_id);
     `);
   }
 
@@ -670,6 +950,108 @@ class PostgreSQLAdapter extends StorageAdapter {
       [new Date().toISOString(), keyHash]
     );
   }
+
+  // --- Organizations ---
+  async createOrganization(data) {
+    await this.pool.query(
+      `INSERT INTO organizations (id, name, owner_user_id, created_at)
+       VALUES ($1, $2, $3, $4)`,
+      [data.id, data.name, data.owner_user_id, data.created_at]
+    );
+    return this.getOrganization(data.id);
+  }
+
+  async getOrganization(id) {
+    const res = await this.pool.query('SELECT * FROM organizations WHERE id = $1', [id]);
+    return res.rows[0] || null;
+  }
+
+  async listUserOrganizations(userId) {
+    const res = await this.pool.query(
+      `SELECT o.* FROM organizations o
+       JOIN org_memberships m ON m.org_id = o.id
+       WHERE m.user_id = $1
+       ORDER BY o.created_at DESC`,
+      [userId]
+    );
+    return res.rows;
+  }
+
+  async deleteOrganization(id) {
+    await this.pool.query('DELETE FROM organizations WHERE id = $1', [id]);
+  }
+
+  // --- Org Memberships ---
+  async addOrgMember(data) {
+    await this.pool.query(
+      `INSERT INTO org_memberships (user_id, org_id, role, joined_at)
+       VALUES ($1, $2, $3, $4)`,
+      [data.user_id, data.org_id, data.role || 'member', data.joined_at]
+    );
+  }
+
+  async removeOrgMember(userId, orgId) {
+    await this.pool.query('DELETE FROM org_memberships WHERE user_id = $1 AND org_id = $2', [userId, orgId]);
+  }
+
+  async updateOrgMemberRole(userId, orgId, role) {
+    await this.pool.query('UPDATE org_memberships SET role = $1 WHERE user_id = $2 AND org_id = $3',
+      [role, userId, orgId]);
+  }
+
+  async getOrgMembers(orgId) {
+    const res = await this.pool.query(
+      `SELECT u.id, u.email, u.username, m.role, m.joined_at
+       FROM users u
+       JOIN org_memberships m ON m.user_id = u.id
+       WHERE m.org_id = $1
+       ORDER BY m.joined_at ASC`,
+      [orgId]
+    );
+    return res.rows;
+  }
+
+  async getOrgMembership(userId, orgId) {
+    const res = await this.pool.query(
+      'SELECT * FROM org_memberships WHERE user_id = $1 AND org_id = $2',
+      [userId, orgId]
+    );
+    return res.rows[0] || null;
+  }
+
+  // --- Org Entitlements ---
+  async grantAppAccess(orgId, appName) {
+    await this.pool.query(
+      `INSERT INTO org_entitlements (org_id, app_name, granted_at)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (org_id, app_name) DO NOTHING`,
+      [orgId, appName, new Date().toISOString()]
+    );
+  }
+
+  async revokeAppAccess(orgId, appName) {
+    await this.pool.query('DELETE FROM org_entitlements WHERE org_id = $1 AND app_name = $2',
+      [orgId, appName]);
+  }
+
+  async getOrgEntitlements(orgId) {
+    const res = await this.pool.query(
+      'SELECT app_name FROM org_entitlements WHERE org_id = $1 ORDER BY granted_at ASC',
+      [orgId]
+    );
+    return res.rows.map(row => row.app_name);
+  }
+
+  async checkAccess(userId, orgId, appName) {
+    // Check if user is member of org AND org has access to app
+    const res = await this.pool.query(
+      `SELECT 1 FROM org_memberships m
+       JOIN org_entitlements e ON e.org_id = m.org_id
+       WHERE m.user_id = $1 AND m.org_id = $2 AND e.app_name = $3`,
+      [userId, orgId, appName]
+    );
+    return res.rows.length > 0;
+  }
 }
 
 // ============================================================================
@@ -738,7 +1120,7 @@ class AuthKit extends EventEmitter {
 
     const now = new Date().toISOString();
     const user = {
-      id: uuidv4(),
+      id: crypto.randomUUID(),
       email: email.toLowerCase().trim(),
       username: username || null,
       password_hash: hashPassword(password),
@@ -846,7 +1228,7 @@ class AuthKit extends EventEmitter {
     const now = new Date().toISOString();
 
     await this.storage.createToken({
-      id: uuidv4(),
+      id: crypto.randomUUID(),
       user_id: user.id,
       token_hash: tokenHash,
       token_type: 'session',
@@ -920,7 +1302,7 @@ class AuthKit extends EventEmitter {
     const expiresAt = new Date(Date.now() + expiryMs).toISOString();
 
     await this.storage.createToken({
-      id: uuidv4(),
+      id: crypto.randomUUID(),
       user_id: user.id,
       token_hash: newHash,
       token_type: 'session',
@@ -1018,7 +1400,7 @@ class AuthKit extends EventEmitter {
     const now = new Date().toISOString();
 
     const record = {
-      id: uuidv4(),
+      id: crypto.randomUUID(),
       user_id: userId,
       key_hash: keyHash,
       name,
@@ -1175,6 +1557,176 @@ class AuthKit extends EventEmitter {
         return res.status(403).json({ error: `Permission '${permission}' required` });
       }
       next();
+    };
+  }
+
+  // --------------------------------------------------------------------------
+  // ORGANIZATIONS
+  // --------------------------------------------------------------------------
+
+  /**
+   * Create a new organization
+   * @returns {{ id, name, owner_user_id, created_at }}
+   */
+  async createOrganization({ name, owner_user_id, entitlements = [] }) {
+    if (!name) throw new Error('Organization name is required');
+    if (!owner_user_id) throw new Error('Owner user ID is required');
+
+    const org = await this.storage.createOrganization({
+      id: 'org_' + nanoid(),
+      name,
+      owner_user_id,
+      created_at: new Date().toISOString(),
+    });
+
+    // Add owner as member with owner role
+    await this.storage.addOrgMember({
+      user_id: owner_user_id,
+      org_id: org.id,
+      role: 'owner',
+      joined_at: new Date().toISOString(),
+    });
+
+    // Grant app entitlements
+    for (const appName of entitlements) {
+      await this.storage.grantAppAccess(org.id, appName);
+    }
+
+    this.emit('org:created', { org });
+    return org;
+  }
+
+  /**
+   * Get organization by ID
+   */
+  async getOrganization(id) {
+    return this.storage.getOrganization(id);
+  }
+
+  /**
+   * List all organizations a user belongs to
+   */
+  async listUserOrganizations(userId) {
+    return this.storage.listUserOrganizations(userId);
+  }
+
+  /**
+   * Delete an organization (owner only)
+   */
+  async deleteOrganization(id) {
+    await this.storage.deleteOrganization(id);
+    this.emit('org:deleted', { org_id: id });
+  }
+
+  /**
+   * Add a member to an organization
+   */
+  async addOrgMember({ org_id, user_id, role = 'member' }) {
+    await this.storage.addOrgMember({
+      user_id,
+      org_id,
+      role,
+      joined_at: new Date().toISOString(),
+    });
+    this.emit('org:member_added', { org_id, user_id, role });
+  }
+
+  /**
+   * Remove a member from an organization
+   */
+  async removeOrgMember({ org_id, user_id }) {
+    await this.storage.removeOrgMember(user_id, org_id);
+    this.emit('org:member_removed', { org_id, user_id });
+  }
+
+  /**
+   * Update a member's role in an organization
+   */
+  async updateOrgMemberRole({ org_id, user_id, role }) {
+    await this.storage.updateOrgMemberRole(user_id, org_id, role);
+    this.emit('org:member_role_updated', { org_id, user_id, role });
+  }
+
+  /**
+   * List all members of an organization
+   */
+  async getOrgMembers(org_id) {
+    return this.storage.getOrgMembers(org_id);
+  }
+
+  /**
+   * Get a user's membership in an organization
+   */
+  async getOrgMembership(user_id, org_id) {
+    return this.storage.getOrgMembership(user_id, org_id);
+  }
+
+  /**
+   * Grant app access to an organization
+   */
+  async grantAppAccess({ org_id, app_name }) {
+    await this.storage.grantAppAccess(org_id, app_name);
+    this.emit('org:app_granted', { org_id, app_name });
+  }
+
+  /**
+   * Revoke app access from an organization
+   */
+  async revokeAppAccess({ org_id, app_name }) {
+    await this.storage.revokeAppAccess(org_id, app_name);
+    this.emit('org:app_revoked', { org_id, app_name });
+  }
+
+  /**
+   * Get all app entitlements for an organization
+   * @returns {string[]} Array of app names
+   */
+  async getOrgEntitlements(org_id) {
+    return this.storage.getOrgEntitlements(org_id);
+  }
+
+  /**
+   * Check if a user has access to an app via an organization
+   */
+  async checkAccess({ user_id, org_id, app_name }) {
+    return this.storage.checkAccess(user_id, org_id, app_name);
+  }
+
+  /**
+   * Login with organization context
+   * @returns {{ user, token, expiresAt, org, role, entitlements }}
+   */
+  async loginWithOrg(email, password, org_id = null) {
+    // First, do regular login
+    const loginResult = await this.login(email, password);
+
+    // Get user's organizations
+    const orgs = await this.listUserOrganizations(loginResult.user.id);
+
+    if (orgs.length === 0) {
+      throw new Error('User is not a member of any organization');
+    }
+
+    // Use provided org_id or default to first org
+    let selectedOrg;
+    if (org_id) {
+      selectedOrg = orgs.find(o => o.id === org_id);
+      if (!selectedOrg) {
+        throw new Error('User is not a member of the specified organization');
+      }
+    } else {
+      selectedOrg = orgs[0];
+    }
+
+    // Get membership role and entitlements
+    const membership = await this.getOrgMembership(loginResult.user.id, selectedOrg.id);
+    const entitlements = await this.getOrgEntitlements(selectedOrg.id);
+
+    return {
+      ...loginResult,
+      org: selectedOrg,
+      role: membership.role,
+      entitlements,
     };
   }
 
