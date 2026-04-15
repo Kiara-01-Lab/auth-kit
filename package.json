@@ -16,8 +16,7 @@
     "server": "node server.js",
     "test": "jest --coverage",
     "test:watch": "jest --watch",
-    "test:ci": "jest --ci --coverage --maxWorkers=2",
-    "prepublishOnly": "npm run test"
+    "test:ci": "jest --ci --coverage --maxWorkers=2"
   },
   "keywords": [
     "authentication",
@@ -47,7 +46,8 @@
     "express-rate-limit": "^8.2.1",
     "nanoid": "^3.3.7",
     "pg": "^8.13.3",
-    "sql.js": "^1.13.0"
+    "sql.js": "^1.13.0",
+    "stripe": "^22.0.1"
   },
   "devDependencies": {
     "@babel/preset-env": "^7.28.6",

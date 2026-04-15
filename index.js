@@ -1052,6 +1052,175 @@ class PostgreSQLAdapter extends StorageAdapter {
     );
     return res.rows.length > 0;
   }
+
+  // --- Subscription Plans ---
+  async createSubscriptionPlan(data) {
+    const res = await this.pool.query(
+      `INSERT INTO subscription_plans (id, name, display_name, description, stripe_product_id, stripe_price_id, stripe_price_id_yearly, price_monthly, price_yearly, currency, features, is_active, sort_order, recommended, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+       RETURNING *`,
+      [data.id, data.name, data.display_name, data.description || null,
+       data.stripe_product_id || null, data.stripe_price_id || null, data.stripe_price_id_yearly || null,
+       data.price_monthly || 0, data.price_yearly || 0, data.currency || 'USD',
+       JSON.stringify(data.features || {}), data.is_active !== false, data.sort_order || 0, data.recommended || false,
+       data.created_at, data.updated_at]
+    );
+    return res.rows[0];
+  }
+
+  async getSubscriptionPlan(id) {
+    const res = await this.pool.query('SELECT * FROM subscription_plans WHERE id = $1', [id]);
+    return res.rows[0] || null;
+  }
+
+  async getSubscriptionPlanByName(name) {
+    const res = await this.pool.query('SELECT * FROM subscription_plans WHERE name = $1', [name]);
+    return res.rows[0] || null;
+  }
+
+  async listSubscriptionPlans(activeOnly = false) {
+    const sql = activeOnly
+      ? 'SELECT * FROM subscription_plans WHERE is_active = true ORDER BY sort_order ASC'
+      : 'SELECT * FROM subscription_plans ORDER BY sort_order ASC';
+    const res = await this.pool.query(sql);
+    return res.rows;
+  }
+
+  async updateSubscriptionPlan(id, updates) {
+    const plan = await this.getSubscriptionPlan(id);
+    if (!plan) return null;
+
+    const merged = { ...plan, ...updates, updated_at: new Date().toISOString() };
+    const res = await this.pool.query(
+      `UPDATE subscription_plans
+       SET name=$1, display_name=$2, description=$3, stripe_product_id=$4, stripe_price_id=$5,
+           stripe_price_id_yearly=$6, price_monthly=$7, price_yearly=$8, currency=$9, features=$10,
+           is_active=$11, sort_order=$12, recommended=$13, updated_at=$14
+       WHERE id=$15
+       RETURNING *`,
+      [merged.name, merged.display_name, merged.description, merged.stripe_product_id, merged.stripe_price_id,
+       merged.stripe_price_id_yearly, merged.price_monthly, merged.price_yearly, merged.currency,
+       JSON.stringify(merged.features), merged.is_active, merged.sort_order, merged.recommended,
+       merged.updated_at, id]
+    );
+    return res.rows[0] || null;
+  }
+
+  // --- Subscriptions ---
+  async createSubscription(data) {
+    const res = await this.pool.query(
+      `INSERT INTO subscriptions (id, user_id, plan_id, status, stripe_customer_id, stripe_subscription_id, stripe_latest_invoice_id, stripe_payment_intent_status, billing_cycle, feature_overrides, trial_start, trial_end, current_period_start, current_period_end, cancel_at_period_end, cancelled_at, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+       RETURNING *`,
+      [data.id, data.user_id, data.plan_id, data.status || 'active',
+       data.stripe_customer_id || null, data.stripe_subscription_id || null,
+       data.stripe_latest_invoice_id || null, data.stripe_payment_intent_status || null,
+       data.billing_cycle || 'monthly', JSON.stringify(data.feature_overrides || {}),
+       data.trial_start || null, data.trial_end || null,
+       data.current_period_start || null, data.current_period_end || null,
+       data.cancel_at_period_end || false, data.cancelled_at || null,
+       data.created_at, data.updated_at]
+    );
+    return res.rows[0];
+  }
+
+  async getUserSubscription(userId) {
+    const res = await this.pool.query(
+      `SELECT s.*, p.name as plan_name, p.display_name as plan_display_name,
+              p.features as plan_features, p.price_monthly, p.price_yearly
+       FROM subscriptions s
+       JOIN subscription_plans p ON p.id = s.plan_id
+       WHERE s.user_id = $1 AND s.status IN ('active', 'trialing')
+       ORDER BY s.created_at DESC
+       LIMIT 1`,
+      [userId]
+    );
+    return res.rows[0] || null;
+  }
+
+  async getSubscription(id) {
+    const res = await this.pool.query('SELECT * FROM subscriptions WHERE id = $1', [id]);
+    return res.rows[0] || null;
+  }
+
+  async updateSubscription(id, updates) {
+    const sub = await this.getSubscription(id);
+    if (!sub) return null;
+
+    const merged = { ...sub, ...updates, updated_at: new Date().toISOString() };
+    const res = await this.pool.query(
+      `UPDATE subscriptions
+       SET user_id=$1, plan_id=$2, status=$3, stripe_customer_id=$4, stripe_subscription_id=$5,
+           stripe_latest_invoice_id=$6, stripe_payment_intent_status=$7, billing_cycle=$8,
+           feature_overrides=$9, trial_start=$10, trial_end=$11, current_period_start=$12,
+           current_period_end=$13, cancel_at_period_end=$14, cancelled_at=$15, updated_at=$16
+       WHERE id=$17
+       RETURNING *`,
+      [merged.user_id, merged.plan_id, merged.status, merged.stripe_customer_id, merged.stripe_subscription_id,
+       merged.stripe_latest_invoice_id, merged.stripe_payment_intent_status, merged.billing_cycle,
+       JSON.stringify(merged.feature_overrides), merged.trial_start, merged.trial_end,
+       merged.current_period_start, merged.current_period_end, merged.cancel_at_period_end,
+       merged.cancelled_at, merged.updated_at, id]
+    );
+    return res.rows[0] || null;
+  }
+
+  async deleteSubscription(id) {
+    await this.pool.query('DELETE FROM subscriptions WHERE id = $1', [id]);
+  }
+
+  // --- Subscription Usage ---
+  async createUsageRecord(data) {
+    const res = await this.pool.query(
+      `INSERT INTO subscription_usage (id, user_id, subscription_id, period_start, period_end, boards_count, tickets_count, storage_used_mb, ai_tokens_used, translation_requests_count, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+       RETURNING *`,
+      [data.id, data.user_id, data.subscription_id, data.period_start, data.period_end,
+       data.boards_count || 0, data.tickets_count || 0, data.storage_used_mb || 0,
+       data.ai_tokens_used || 0, data.translation_requests_count || 0,
+       data.created_at, data.updated_at]
+    );
+    return res.rows[0];
+  }
+
+  async getUserUsage(userId, periodStart) {
+    const res = await this.pool.query(
+      'SELECT * FROM subscription_usage WHERE user_id = $1 AND period_start = $2',
+      [userId, periodStart]
+    );
+    return res.rows[0] || null;
+  }
+
+  async updateUsage(id, updates) {
+    const usage = await this.pool.query('SELECT * FROM subscription_usage WHERE id = $1', [id]);
+    if (!usage.rows[0]) return null;
+
+    const merged = { ...usage.rows[0], ...updates, updated_at: new Date().toISOString() };
+    const res = await this.pool.query(
+      `UPDATE subscription_usage
+       SET boards_count=$1, tickets_count=$2, storage_used_mb=$3, ai_tokens_used=$4,
+           translation_requests_count=$5, updated_at=$6
+       WHERE id=$7
+       RETURNING *`,
+      [merged.boards_count, merged.tickets_count, merged.storage_used_mb, merged.ai_tokens_used,
+       merged.translation_requests_count, merged.updated_at, id]
+    );
+    return res.rows[0] || null;
+  }
+
+  async incrementUsage(userId, periodStart, field, amount = 1) {
+    const usage = await this.getUserUsage(userId, periodStart);
+    if (!usage) return null;
+
+    const res = await this.pool.query(
+      `UPDATE subscription_usage
+       SET ${field} = ${field} + $1, updated_at = $2
+       WHERE id = $3
+       RETURNING *`,
+      [amount, new Date().toISOString(), usage.id]
+    );
+    return res.rows[0] || null;
+  }
 }
 
 // ============================================================================
@@ -1728,6 +1897,276 @@ class AuthKit extends EventEmitter {
       role: membership.role,
       entitlements,
     };
+  }
+
+  // --------------------------------------------------------------------------
+  // SUBSCRIPTIONS
+  // --------------------------------------------------------------------------
+
+  /**
+   * Create a subscription plan
+   * @returns {object} Created plan
+   */
+  async createPlan({ name, display_name, description, stripe_product_id, stripe_price_id, stripe_price_id_yearly, price_monthly, price_yearly, currency, features, is_active, sort_order, recommended }) {
+    if (!name) throw new Error('Plan name is required');
+    if (!display_name) throw new Error('Plan display_name is required');
+
+    const plan = await this.storage.createSubscriptionPlan({
+      id: crypto.randomUUID(),
+      name,
+      display_name,
+      description: description || null,
+      stripe_product_id: stripe_product_id || null,
+      stripe_price_id: stripe_price_id || null,
+      stripe_price_id_yearly: stripe_price_id_yearly || null,
+      price_monthly: price_monthly || 0,
+      price_yearly: price_yearly || 0,
+      currency: currency || 'USD',
+      features: features || {},
+      is_active: is_active !== false,
+      sort_order: sort_order || 0,
+      recommended: recommended || false,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
+
+    this.emit('plan:created', plan);
+    return plan;
+  }
+
+  /**
+   * Get all subscription plans (optionally active only)
+   */
+  async getPlans(activeOnly = false) {
+    return this.storage.listSubscriptionPlans(activeOnly);
+  }
+
+  /**
+   * Get a single plan by ID or name
+   */
+  async getPlan(idOrName) {
+    // Try by ID first
+    let plan = await this.storage.getSubscriptionPlan(idOrName);
+    if (!plan) {
+      // Try by name
+      plan = await this.storage.getSubscriptionPlanByName(idOrName);
+    }
+    return plan;
+  }
+
+  /**
+   * Update a subscription plan
+   */
+  async updatePlan(id, updates) {
+    const plan = await this.storage.updateSubscriptionPlan(id, updates);
+    if (!plan) throw new Error('Plan not found');
+    this.emit('plan:updated', plan);
+    return plan;
+  }
+
+  /**
+   * Subscribe a user to a plan
+   * @returns {object} Created subscription
+   */
+  async subscribe(userId, planIdOrName, { billing_cycle = 'monthly', trial_days = 0, stripe_customer_id = null, stripe_subscription_id = null } = {}) {
+    const user = await this.storage.getUser(userId);
+    if (!user) throw new Error('User not found');
+
+    const plan = await this.getPlan(planIdOrName);
+    if (!plan) throw new Error('Plan not found');
+
+    const now = new Date();
+    const nowISO = now.toISOString();
+
+    let status = 'active';
+    let trial_start = null;
+    let trial_end = null;
+
+    if (trial_days > 0) {
+      status = 'trialing';
+      trial_start = nowISO;
+      trial_end = new Date(now.getTime() + trial_days * 24 * 60 * 60 * 1000).toISOString();
+    }
+
+    const period_start = nowISO;
+    const period_end = new Date(
+      now.getFullYear(),
+      now.getMonth() + (billing_cycle === 'yearly' ? 12 : 1),
+      now.getDate()
+    ).toISOString();
+
+    const subscription = await this.storage.createSubscription({
+      id: crypto.randomUUID(),
+      user_id: userId,
+      plan_id: plan.id,
+      status,
+      billing_cycle,
+      stripe_customer_id,
+      stripe_subscription_id,
+      trial_start,
+      trial_end,
+      current_period_start: period_start,
+      current_period_end: period_end,
+      feature_overrides: {},
+      cancel_at_period_end: false,
+      created_at: nowISO,
+      updated_at: nowISO,
+    });
+
+    // Create usage record for this period
+    await this.storage.createUsageRecord({
+      id: crypto.randomUUID(),
+      user_id: userId,
+      subscription_id: subscription.id,
+      period_start,
+      period_end,
+      boards_count: 0,
+      tickets_count: 0,
+      storage_used_mb: 0,
+      ai_tokens_used: 0,
+      translation_requests_count: 0,
+      created_at: nowISO,
+      updated_at: nowISO,
+    });
+
+    this.emit('subscription:created', { user_id: userId, subscription });
+    return subscription;
+  }
+
+  /**
+   * Get a user's active subscription with plan details
+   * @returns {object|null} Subscription with plan data, or null
+   */
+  async getSubscription(userId) {
+    return this.storage.getUserSubscription(userId);
+  }
+
+  /**
+   * Get merged features for a user (plan features + overrides)
+   * @returns {object} Merged features
+   */
+  async getFeatures(userId) {
+    const sub = await this.getSubscription(userId);
+    if (!sub) return {};
+
+    const planFeatures = sub.plan_features || {};
+    const overrides = sub.feature_overrides || {};
+
+    return { ...planFeatures, ...overrides };
+  }
+
+  /**
+   * Check if a user has exceeded a specific limit
+   * @returns {boolean} true if within limit, false if exceeded
+   */
+  async checkLimit(userId, limitName) {
+    const features = await this.getFeatures(userId);
+    const limit = features[limitName];
+
+    // null means unlimited
+    if (limit === null || limit === undefined) return true;
+
+    // Get current usage
+    const now = new Date();
+    const periodStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
+    const usage = await this.storage.getUserUsage(userId, periodStart);
+
+    if (!usage) return true; // No usage yet, within limit
+
+    const usageMap = {
+      max_boards: usage.boards_count,
+      max_tickets_per_board: usage.tickets_count,
+      ai_tokens_per_month: usage.ai_tokens_used,
+      translation_requests_per_month: usage.translation_requests_count,
+      max_storage_mb: usage.storage_used_mb,
+    };
+
+    const currentUsage = usageMap[limitName] || 0;
+    return currentUsage < limit;
+  }
+
+  /**
+   * Increment usage for a user
+   */
+  async incrementUsage(userId, usageType, amount = 1) {
+    const now = new Date();
+    const periodStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
+
+    const fieldMap = {
+      boards: 'boards_count',
+      tickets: 'tickets_count',
+      ai_tokens: 'ai_tokens_used',
+      translations: 'translation_requests_count',
+      storage_mb: 'storage_used_mb',
+    };
+
+    const field = fieldMap[usageType];
+    if (!field) throw new Error(`Unknown usage type: ${usageType}`);
+
+    return this.storage.incrementUsage(userId, periodStart, field, amount);
+  }
+
+  /**
+   * Update subscription with Stripe data
+   */
+  async updateStripeData(userId, { stripe_customer_id, stripe_subscription_id, stripe_latest_invoice_id, stripe_payment_intent_status, status }) {
+    const sub = await this.getSubscription(userId);
+    if (!sub) throw new Error('No active subscription found');
+
+    const updates = {};
+    if (stripe_customer_id) updates.stripe_customer_id = stripe_customer_id;
+    if (stripe_subscription_id) updates.stripe_subscription_id = stripe_subscription_id;
+    if (stripe_latest_invoice_id) updates.stripe_latest_invoice_id = stripe_latest_invoice_id;
+    if (stripe_payment_intent_status) updates.stripe_payment_intent_status = stripe_payment_intent_status;
+    if (status) updates.status = status;
+
+    const updated = await this.storage.updateSubscription(sub.id, updates);
+    this.emit('subscription:updated', { user_id: userId, subscription: updated });
+    return updated;
+  }
+
+  /**
+   * Cancel a subscription (at period end)
+   */
+  async cancelSubscription(userId, immediately = false) {
+    const sub = await this.getSubscription(userId);
+    if (!sub) throw new Error('No active subscription found');
+
+    const updates = {
+      cancel_at_period_end: !immediately,
+      cancelled_at: new Date().toISOString(),
+    };
+
+    if (immediately) {
+      updates.status = 'cancelled';
+    }
+
+    const updated = await this.storage.updateSubscription(sub.id, updates);
+    this.emit('subscription:cancelled', { user_id: userId, immediately, subscription: updated });
+    return updated;
+  }
+
+  /**
+   * Change a user's subscription plan
+   */
+  async changePlan(userId, newPlanIdOrName, { billing_cycle = null, prorate = true } = {}) {
+    const currentSub = await this.getSubscription(userId);
+    if (!currentSub) throw new Error('No active subscription found');
+
+    const newPlan = await this.getPlan(newPlanIdOrName);
+    if (!newPlan) throw new Error('New plan not found');
+
+    const updates = {
+      plan_id: newPlan.id,
+    };
+
+    if (billing_cycle) {
+      updates.billing_cycle = billing_cycle;
+    }
+
+    const updated = await this.storage.updateSubscription(currentSub.id, updates);
+    this.emit('subscription:plan_changed', { user_id: userId, old_plan_id: currentSub.plan_id, new_plan_id: newPlan.id });
+    return updated;
   }
 
   // --------------------------------------------------------------------------

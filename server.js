@@ -10,6 +10,7 @@ const express = require('express');
 const cors = require('cors');
 const rateLimit = require('express-rate-limit');
 const { AuthKit } = require('./index.js');
+const StripeService = require('./stripe-service.js');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -28,6 +29,7 @@ app.use(cors());
 app.use(express.json());
 
 let auth;
+let stripeService;
 
 async function init() {
   auth = await AuthKit.create({
@@ -40,6 +42,14 @@ async function init() {
       viewer: ['read'],
     },
   });
+
+  // Initialize Stripe service if key is provided
+  if (process.env.STRIPE_SECRET_KEY) {
+    stripeService = new StripeService(process.env.STRIPE_SECRET_KEY, auth);
+    console.log('✅ Stripe service initialized');
+  } else {
+    console.log('⚠️  STRIPE_SECRET_KEY not set - Stripe features disabled');
+  }
 
   // Attach middleware globally so req.user is populated on all routes
   app.use(auth.expressMiddleware());
@@ -76,27 +86,51 @@ app.get('/', (req, res) => {
     name: 'AuthKit',
     version: require('./package.json').version,
     status: 'ok',
+    stripe_enabled: !!stripeService,
     admin_ui: '/admin',
-    endpoints: [
-      'POST /auth/register',
-      'POST /auth/login',
-      'POST /auth/logout',
-      'GET  /auth/me',
-      'POST /auth/refresh',
-      'POST /auth/change-password',
-      'POST /auth/forgot-password',
-      'POST /auth/reset-password',
-      'GET  /users              (admin)',
-      'POST /users              (admin)',
-      'GET  /users/:id          (admin)',
-      'PATCH /users/:id         (admin)',
-      'DELETE /users/:id        (admin)',
-      'POST /users/:id/roles    (admin)',
-      'DELETE /users/:id/roles/:role (admin)',
-      'GET  /users/:id/api-keys',
-      'POST /users/:id/api-keys',
-      'DELETE /api-keys/:id',
-    ],
+    categories: {
+      authentication: [
+        'POST /auth/register',
+        'POST /auth/login',
+        'POST /auth/logout',
+        'GET  /auth/me',
+        'POST /auth/refresh',
+        'POST /auth/change-password',
+        'POST /auth/forgot-password',
+        'POST /auth/reset-password',
+      ],
+      users: [
+        'GET  /users              (admin)',
+        'POST /users              (admin)',
+        'GET  /users/:id          (admin)',
+        'PATCH /users/:id         (admin)',
+        'DELETE /users/:id        (admin)',
+        'POST /users/:id/roles    (admin)',
+        'DELETE /users/:id/roles/:role (admin)',
+        'GET  /users/:id/api-keys',
+        'POST /users/:id/api-keys',
+        'DELETE /api-keys/:id',
+      ],
+      subscriptions: [
+        'GET  /api/subscriptions/plans',
+        'GET  /api/subscriptions/user/:userId',
+        'GET  /api/subscriptions/user/:userId/features',
+        'GET  /api/subscriptions/user/:userId/check-limit/:limitName',
+        'POST /api/subscriptions/user/:userId/usage',
+        'POST /api/subscriptions/subscribe',
+        'POST /api/subscriptions/user/:userId/cancel',
+        'POST /api/subscriptions/user/:userId/change-plan',
+        'POST /api/subscriptions/user/:userId/stripe',
+      ],
+      stripe: [
+        'POST /api/stripe/create-checkout',
+        'POST /api/stripe/create-customer',
+        'POST /api/stripe/cancel-subscription',
+        'POST /api/stripe/update-payment-method',
+        'POST /api/stripe/change-plan',
+        'POST /webhooks/stripe',
+      ],
+    },
   });
 });
 
@@ -359,6 +393,249 @@ app.delete('/api-keys/:id', requireAuth(), async (req, res, next) => {
     res.status(204).send();
   } catch (err) {
     next(err);
+  }
+});
+
+// ============================================================================
+// SUBSCRIPTIONS
+// ============================================================================
+
+// Get all subscription plans
+app.get('/api/subscriptions/plans', async (req, res, next) => {
+  try {
+    const activeOnly = req.query.activeOnly === 'true';
+    const plans = await auth.getPlans(activeOnly);
+    res.json(plans);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Get user's active subscription
+app.get('/api/subscriptions/user/:userId', requireAuth(), async (req, res, next) => {
+  try {
+    const subscription = await auth.getSubscription(req.params.userId);
+    res.json(subscription || { subscription: null });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Get user's subscription features
+app.get('/api/subscriptions/user/:userId/features', requireAuth(), async (req, res, next) => {
+  try {
+    const features = await auth.getFeatures(req.params.userId);
+    res.json({ features });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Check if user has exceeded a limit
+app.get('/api/subscriptions/user/:userId/check-limit/:limitName', requireAuth(), async (req, res, next) => {
+  try {
+    const withinLimit = await auth.checkLimit(req.params.userId, req.params.limitName);
+    res.json({ withinLimit });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Increment usage for a user
+app.post('/api/subscriptions/user/:userId/usage', requireAuth(), async (req, res, next) => {
+  try {
+    const { usageType, amount = 1 } = req.body;
+    const usage = await auth.incrementUsage(req.params.userId, usageType, amount);
+    res.json(usage);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Subscribe a user to a plan
+app.post('/api/subscriptions/subscribe', requireAuth(), async (req, res, next) => {
+  try {
+    const { userId, planIdOrName, billing_cycle, trial_days, stripe_customer_id, stripe_subscription_id } = req.body;
+    const subscription = await auth.subscribe(userId, planIdOrName, {
+      billing_cycle,
+      trial_days,
+      stripe_customer_id,
+      stripe_subscription_id,
+    });
+    res.json(subscription);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Cancel a subscription
+app.post('/api/subscriptions/user/:userId/cancel', requireAuth(), async (req, res, next) => {
+  try {
+    const { immediately = false } = req.body;
+    const subscription = await auth.cancelSubscription(req.params.userId, immediately);
+    res.json(subscription);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Change subscription plan
+app.post('/api/subscriptions/user/:userId/change-plan', requireAuth(), async (req, res, next) => {
+  try {
+    const { newPlanIdOrName, billing_cycle, prorate } = req.body;
+    const subscription = await auth.changePlan(req.params.userId, newPlanIdOrName, {
+      billing_cycle,
+      prorate,
+    });
+    res.json(subscription);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Update Stripe data for a subscription
+app.post('/api/subscriptions/user/:userId/stripe', requireAuth(), async (req, res, next) => {
+  try {
+    const { stripe_customer_id, stripe_subscription_id, stripe_latest_invoice_id, stripe_payment_intent_status, status } = req.body;
+    const subscription = await auth.updateStripeData(req.params.userId, {
+      stripe_customer_id,
+      stripe_subscription_id,
+      stripe_latest_invoice_id,
+      stripe_payment_intent_status,
+      status,
+    });
+    res.json(subscription);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ============================================================================
+// STRIPE INTEGRATION (Centralized Payment Processing)
+// ============================================================================
+
+// Create Stripe checkout session
+app.post('/api/stripe/create-checkout', requireAuth(), async (req, res, next) => {
+  try {
+    if (!stripeService) {
+      return res.status(503).json({ error: 'Stripe service not configured' });
+    }
+
+    const { userId, planIdOrName, billing_cycle = 'monthly', trial_days = 0 } = req.body;
+
+    const result = await stripeService.createSubscription(userId, planIdOrName, {
+      billing_cycle,
+      trial_days,
+    });
+
+    res.json({
+      stripe: result.stripe,
+      subscription: result.authkit,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Create Stripe customer
+app.post('/api/stripe/create-customer', requireAuth(), async (req, res, next) => {
+  try {
+    if (!stripeService) {
+      return res.status(503).json({ error: 'Stripe service not configured' });
+    }
+
+    const { userId, email, metadata = {} } = req.body;
+    const customer = await stripeService.createCustomer(userId, email, metadata);
+
+    res.json(customer);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Cancel Stripe subscription
+app.post('/api/stripe/cancel-subscription', requireAuth(), async (req, res, next) => {
+  try {
+    if (!stripeService) {
+      return res.status(503).json({ error: 'Stripe service not configured' });
+    }
+
+    const { userId, immediately = false } = req.body;
+    const subscription = await stripeService.cancelSubscription(userId, immediately);
+
+    res.json(subscription);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Update payment method
+app.post('/api/stripe/update-payment-method', requireAuth(), async (req, res, next) => {
+  try {
+    if (!stripeService) {
+      return res.status(503).json({ error: 'Stripe service not configured' });
+    }
+
+    const { userId, paymentMethodId } = req.body;
+    const result = await stripeService.updatePaymentMethod(userId, paymentMethodId);
+
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Change subscription plan
+app.post('/api/stripe/change-plan', requireAuth(), async (req, res, next) => {
+  try {
+    if (!stripeService) {
+      return res.status(503).json({ error: 'Stripe service not configured' });
+    }
+
+    const { userId, newPlanIdOrName, billing_cycle, prorate = true } = req.body;
+    const subscription = await stripeService.changePlan(userId, newPlanIdOrName, {
+      billing_cycle,
+      prorate,
+    });
+
+    res.json(subscription);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Stripe webhook handler (MUST receive raw body for signature verification)
+app.post('/webhooks/stripe', express.raw({ type: 'application/json' }), async (req, res) => {
+  if (!stripeService) {
+    console.error('Stripe webhook received but service not configured');
+    return res.status(503).json({ error: 'Stripe service not configured' });
+  }
+
+  const sig = req.headers['stripe-signature'];
+  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+
+  if (!webhookSecret) {
+    console.error('STRIPE_WEBHOOK_SECRET not set');
+    return res.status(500).json({ error: 'Webhook secret not configured' });
+  }
+
+  try {
+    // Verify and construct event
+    const event = stripeService.verifyWebhookSignature(
+      req.body,
+      sig,
+      webhookSecret
+    );
+
+    console.log(`✅ Stripe webhook received: ${event.type}`);
+
+    // Handle the event
+    const result = await stripeService.handleWebhook(event);
+
+    res.json(result);
+  } catch (err) {
+    console.error(`❌ Webhook error: ${err.message}`);
+    res.status(400).send(`Webhook Error: ${err.message}`);
   }
 });
 
