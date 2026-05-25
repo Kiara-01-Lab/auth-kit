@@ -153,7 +153,7 @@ VALUES (
     "custom_workflows": true,
     "api_access": true,
     "priority_support": false,
-    "max_board_members": null,
+    "max_board_members": 3,
     "apps": ["fasttask", "fastdeploy", "fastloop-master", "authkit"]
   }'::jsonb,
   true,
